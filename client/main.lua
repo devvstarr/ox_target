@@ -10,6 +10,18 @@ require 'client.debug'
 require 'client.defaults'
 require 'client.compat.qtarget'
 
+local function safeRegisterCommand(name, callback, opts)
+    if type(lib.registerCommand) == 'function' then
+        local ok, err = pcall(lib.registerCommand, name, callback, opts)
+        if ok then
+            return
+        end
+        print(('ox_target: lib.registerCommand failed, falling back to RegisterCommand: %s'):format(tostring(err)))
+    end
+
+    RegisterCommand(name, callback, false)
+end
+
 local SendNuiMessage = SendNuiMessage
 local GetEntityCoords = GetEntityCoords
 local GetEntityType = GetEntityType
@@ -27,6 +39,88 @@ local currentMenu
 local menuChanged
 local menuHistory = {}
 local nearbyZones
+
+local themeMenuOpen = false
+
+local themeMenuOptions = {
+    { label = 'Green',  args = 'green',  icon = 'circle', iconColor = '#8cff50', theme = { primary = '#80ff49', light = '#a5ff66', bright = '#d4ff99', rgb = '128, 255, 73',  icon = '#8cff50' } },
+    { label = 'Gold',   args = 'gold',   icon = 'circle', iconColor = '#ffd700', theme = { primary = '#ffd700', light = '#ffeb99', bright = '#ffeb99', rgb = '255, 215, 0',   icon = '#ffd700' } },
+    { label = 'Blue',   args = 'blue',   icon = 'circle', iconColor = '#1e90ff', theme = { primary = '#00bfff', light = '#1e90ff', bright = '#87ceeb', rgb = '0, 191, 255',   icon = '#1e90ff' } },
+    { label = 'Purple', args = 'purple', icon = 'circle', iconColor = '#ee82ee', theme = { primary = '#da70d6', light = '#ee82ee', bright = '#ff69b4', rgb = '218, 112, 214', icon = '#ee82ee' } },
+    { label = 'Red',    args = 'red',    icon = 'circle', iconColor = '#ff6b6b', theme = { primary = '#ff4444', light = '#ff6b6b', bright = '#ff8888', rgb = '255, 68, 68',   icon = '#ff6b6b' } },
+    { label = 'Cyan',   args = 'cyan',   icon = 'circle', iconColor = '#00ffff', theme = { primary = '#00ffff', light = '#00eeee', bright = '#7ffbff', rgb = '0, 255, 255',   icon = '#00ffff' } },
+    { label = 'Orange', args = 'orange', icon = 'circle', iconColor = '#ffaa44', theme = { primary = '#ff8800', light = '#ffaa44', bright = '#ffcc88', rgb = '255, 136, 0',   icon = '#ffaa44' } },
+    { label = 'Pink',   args = 'pink',   icon = 'circle', iconColor = '#ff85c2', theme = { primary = '#ff69b4', light = '#ff85c2', bright = '#ffb3d9', rgb = '255, 105, 180', icon = '#ff85c2' } },
+    { label = 'White',  args = 'white',  icon = 'circle', iconColor = '#f0f0f0', theme = { primary = '#e0e0e0', light = '#f0f0f0', bright = '#ffffff', rgb = '224, 224, 224', icon = '#f0f0f0' } },
+    { label = 'Teal',   args = 'teal',   icon = 'circle', iconColor = '#00cccc', theme = { primary = '#00b4b4', light = '#00cccc', bright = '#66dddd', rgb = '0, 180, 180',   icon = '#00cccc' } },
+}
+
+local function openThemeMenu()
+    if state.isActive() then return end
+
+    themeMenuOpen = true
+    state.setNuiFocus(true, true)
+    state.setActive(true)
+    SendNuiMessage(json.encode({ event = 'visible', state = true }))
+
+    CreateThread(function()
+        while state.isActive() do
+            DisablePlayerFiring(cache.playerId, true)
+            DisableControlAction(0, 1, true)
+            DisableControlAction(0, 2, true)
+            DisableControlAction(0, 8, true)
+            DisableControlAction(0, 9, true)
+            DisableControlAction(0, 24, true)
+            DisableControlAction(0, 25, true)
+            DisableControlAction(0, 140, true)
+            DisableControlAction(0, 141, true)
+            DisableControlAction(0, 142, true)
+            DisableControlAction(0, 322, true)
+
+            if IsDisabledControlJustPressed(0, 194) or IsDisabledControlJustPressed(0, 322) then
+                themeMenuOpen = false
+                state.setNuiFocus(false, false)
+                state.setActive(false)
+                SendNuiMessage('{"event": "visible", "state": false}')
+            end
+
+            Wait(0)
+        end
+    end)
+
+    CreateThread(function()
+        Wait(50)
+        local savedTheme = GetResourceKvpString('ox_target_theme') or 'green'
+        local opts = {}
+        for i, opt in ipairs(themeMenuOptions) do
+            opts[i] = {
+                label    = opt.label,
+                args     = opt.args,
+                icon     = opt.args == savedTheme and 'fa-circle-check' or 'fa-circle',
+                iconColor = opt.iconColor,
+                theme    = opt.theme,
+            }
+        end
+        SendNuiMessage(json.encode({
+            event = 'setTarget',
+            header = 'ox_target Theme',
+            options = { themes = opts },
+        }))
+    end)
+end
+
+-- Load saved theme on startup
+CreateThread(function()
+    Wait(1000) -- Wait for NUI to load
+    local savedTheme = GetResourceKvpString('ox_target_theme')
+
+    if savedTheme then
+        for i = 1, 3 do
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = savedTheme }))
+            Wait(500)
+        end
+    end
+end)
 
 -- Toggle ox_target, instead of holding the hotkey
 local toggleHotkey = GetConvarInt('ox_target:toggleHotkey', 0) == 1
@@ -154,8 +248,16 @@ local function startTargeting()
             DisableControlAction(0, 142, true)
 
             if state.isNuiFocused() then
-                DisableControlAction(0, 1, true)
-                DisableControlAction(0, 2, true)
+                DisableControlAction(0, 1, true)   -- Mouse look X
+                DisableControlAction(0, 2, true)   -- Mouse look Y
+                DisableControlAction(0, 8, true)   -- Move backward
+                DisableControlAction(0, 9, true)   -- Move forward
+                DisableControlAction(0, 24, true)  -- Attack/LMB (prevents kick on click)
+                DisableControlAction(0, 322, true) -- ESC key (prevent pause menu)
+
+                if IsDisabledControlJustPressed(0, 194) or IsDisabledControlJustPressed(0, 322) then
+                    state.setNuiFocus(false, false)
+                end
 
                 if not hasTarget or options and IsDisabledControlJustPressed(0, 25) then
                     state.setNuiFocus(false, false)
@@ -405,6 +507,22 @@ end
 RegisterNUICallback('select', function(data, cb)
     cb(1)
 
+    if data[1] == 'themes' then
+        local theme = themeMenuOptions[data[2]]
+
+        if theme then
+            SetResourceKvp('ox_target_theme', theme.args)
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = theme.args }))
+            lib.notify({ description = ('Theme changed to: %s'):format(theme.label), type = 'success' })
+        end
+
+        themeMenuOpen = false
+        state.setNuiFocus(false)
+        state.setActive(false)
+        SendNuiMessage('{"event": "visible", "state": false}')
+        return
+    end
+
     local zone = data[3] and nearbyZones[data[3]]
 
     ---@type OxTargetOption?
@@ -431,6 +549,12 @@ RegisterNUICallback('select', function(data, cb)
             options:wipe()
         else
             state.setNuiFocus(false)
+            CreateThread(function()
+                Wait(200) -- Grace period after option select to prevent accidental actions
+                if IsNuiFocused() then
+                    state.setNuiFocus(false)
+                end
+            end)
         end
 
         currentTarget.zone = zone?.id
@@ -454,3 +578,55 @@ RegisterNUICallback('select', function(data, cb)
         state.setActive(false)
     end
 end)
+
+RegisterNUICallback('close', function(data, cb)
+    cb(1)
+    if themeMenuOpen then
+        themeMenuOpen = false
+        state.setActive(false)
+        SendNuiMessage('{"event": "visible", "state": false}')
+    end
+    state.setNuiFocus(false, false)
+end)
+
+-- Theme menu
+safeRegisterCommand('target', function()
+    openThemeMenu()
+end, { help = 'Open the ox_target theme selector' })
+
+lib.registerContext({
+    id = 'targettheme_menu',
+    title = 'ox_target Theme',
+    options = {
+        { label = 'Green', args = 'green', icon = 'circle', iconColor = '80ff49', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'green')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'green' }))
+            lib.notify({ description = 'Theme changed to: Green', type = 'success' })
+        end },
+        { label = 'Gold', args = 'gold', icon = 'circle', iconColor = 'ffd700', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'gold')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'gold' }))
+            lib.notify({ description = 'Theme changed to: Gold', type = 'success' })
+        end },
+        { label = 'Blue', args = 'blue', icon = 'circle', iconColor = '00bfff', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'blue')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'blue' }))
+            lib.notify({ description = 'Theme changed to: Blue', type = 'success' })
+        end },
+        { label = 'Purple', args = 'purple', icon = 'circle', iconColor = 'da70d6', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'purple')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'purple' }))
+            lib.notify({ description = 'Theme changed to: Purple', type = 'success' })
+        end },
+        { label = 'Red', args = 'red', icon = 'circle', iconColor = 'ff4444', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'red')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'red' }))
+            lib.notify({ description = 'Theme changed to: Red', type = 'success' })
+        end },
+        { label = 'Cyan', args = 'cyan', icon = 'circle', iconColor = '00ffff', close = true, onSelect = function(args)
+            SetResourceKvp('ox_target_theme', 'cyan')
+            SendNuiMessage(json.encode({ event = 'setTheme', theme = 'cyan' }))
+            lib.notify({ description = 'Theme changed to: Cyan', type = 'success' })
+        end },
+    }
+})

@@ -525,4 +525,19 @@ function api.isActive()
     return state.isActive()
 end
 
+---Set the UI theme (green, gold, blue, purple, red, cyan)
+---@param theme string
+function api.setTheme(theme)
+    theme = theme:lower()
+    local validThemes = { green = true, gold = true, blue = true, purple = true, red = true, cyan = true }
+    
+    if not validThemes[theme] then
+        utils.warn('Invalid theme. Valid themes: green, gold, blue, purple, red, cyan')
+        return false
+    end
+    
+    SendNuiMessage(json.encode({ event = 'setTheme', theme = theme }))
+    return true
+end
+
 return api
